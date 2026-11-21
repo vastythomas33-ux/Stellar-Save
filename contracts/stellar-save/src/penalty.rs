@@ -13,7 +13,9 @@
 use soroban_sdk::{contracttype, Address, Env};
 
 use crate::{
-    auth::is_active_member, error::StellarSaveError, events::EventEmitter,
+    auth::{is_active_member, require_creator},
+    error::StellarSaveError,
+    events::EventEmitter,
     storage::StorageKeyBuilder,
 };
 
@@ -157,14 +159,36 @@ pub fn apply_penalty(
     member: Address,
     cycle_id: u32,
 ) -> Result<i128, StellarSaveError> {
-    // 1. Verify group exists and get contribution amount
+    let group = load_group(env, group_id)?;
+    apply_penalty_for_group(env, group_id, member, cycle_id, group)
+}
+
+pub(crate) fn apply_penalty_by_creator(
+    env: &Env,
+    group_id: u64,
+    member: Address,
+    cycle_id: u32,
+) -> Result<i128, StellarSaveError> {
+    let group = load_group(env, group_id)?;
+    require_creator(&group.creator, &group)?;
+    apply_penalty_for_group(env, group_id, member, cycle_id, group)
+}
+
+fn load_group(env: &Env, group_id: u64) -> Result<crate::group::Group, StellarSaveError> {
     let group_key = StorageKeyBuilder::group_data(group_id);
-    let group = env
-        .storage()
+    env.storage()
         .persistent()
         .get::<_, crate::group::Group>(&group_key)
-        .ok_or(StellarSaveError::GroupNotFound)?;
+        .ok_or(StellarSaveError::GroupNotFound)
+}
 
+fn apply_penalty_for_group(
+    env: &Env,
+    group_id: u64,
+    member: Address,
+    cycle_id: u32,
+    group: crate::group::Group,
+) -> Result<i128, StellarSaveError> {
     // 2. Verify member belongs to the group
     if !is_active_member(env, group_id, &member) {
         return Err(StellarSaveError::NotMember);
@@ -177,23 +201,27 @@ pub fn apply_penalty(
     let mut state = load_penalty_state(env, group_id, member.clone());
 
     // 5. Increment missed cycles
-    state.missed_cycles = state.missed_cycles.saturating_add(1);
+    state.missed_cycles = state
+        .missed_cycles
+        .checked_add(1)
+        .ok_or(StellarSaveError::Overflow)?;
 
     // 6. Calculate penalty
     let penalty_amount = calculate_penalty(group.contribution_amount, state.missed_cycles, &config);
 
-    // 7. Deduct from group balance (safe: saturating to avoid underflow)
+    // 7. Deduct from the group balance, rejecting arithmetic underflow.
     if penalty_amount > 0 {
         let balance_key = StorageKeyBuilder::group_balance(group_id);
         let current_balance: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
-        let new_balance = current_balance.saturating_sub(penalty_amount);
-        env.storage().persistent().set(&balance_key, &new_balance);
-
-        // Accumulate total penalty for this member
-        state.total_penalty = state
+        let new_balance = current_balance
+            .checked_sub(penalty_amount)
+            .ok_or(StellarSaveError::Overflow)?;
+        let new_total_penalty = state
             .total_penalty
             .checked_add(penalty_amount)
             .ok_or(StellarSaveError::Overflow)?;
+        env.storage().persistent().set(&balance_key, &new_balance);
+        state.total_penalty = new_total_penalty;
     }
 
     // 8. Persist updated state

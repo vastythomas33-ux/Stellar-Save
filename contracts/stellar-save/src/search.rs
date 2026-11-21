@@ -147,7 +147,10 @@ pub fn search_groups(env: &Env, params: SearchParams) -> SearchResult {
                     }
                 }
 
-                id -= 1;
+                let Some(previous_id) = id.checked_sub(1) else {
+                    break;
+                };
+                id = previous_id;
             }
         }
         SortOrder::CreatedAsc => {
@@ -179,7 +182,10 @@ pub fn search_groups(env: &Env, params: SearchParams) -> SearchResult {
                     }
                 }
 
-                id += 1;
+                let Some(next_id) = id.checked_add(1) else {
+                    break;
+                };
+                id = next_id;
             }
         }
     }

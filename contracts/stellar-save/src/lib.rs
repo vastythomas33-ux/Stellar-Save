@@ -46,11 +46,13 @@ pub mod cycle_advancement;
 pub mod deadline;
 pub mod error;
 pub mod errors;
+#[path = "events.rs"]
 pub mod events;
 pub mod governance;
 pub mod group;
 pub mod helpers;
 pub mod migration;
+pub mod milestones;
 pub mod pause;
 pub mod payout;
 pub mod payout_executor;
@@ -88,6 +90,8 @@ pub mod templates;
 // mod auto_contribution_tests;
 // mod invitation_tests;
 #[cfg(test)]
+mod cei_tests;
+#[cfg(test)]
 pub mod test_utils;
 // mod merge_tests;
 // mod migration_matrix_tests;
@@ -100,9 +104,9 @@ pub mod test_utils;
 // ZK test modules — only compiled when the `zk` feature is active.
 // Run with: cargo test -p stellar-save --features zk
 #[cfg(all(test, feature = "zk"))]
-mod zk_tests;
-#[cfg(all(test, feature = "zk"))]
 mod zk_integration_tests;
+#[cfg(all(test, feature = "zk"))]
+mod zk_tests;
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
 pub use auth::{is_active_member, require_admin, require_creator, require_member};
@@ -116,4 +120,3 @@ pub use group::{Group, GroupStatus};
 pub use payout::PayoutRecord;
 pub use storage::StorageKeyBuilder;
 pub use types::{ContractConfig, MemberProfile};
-

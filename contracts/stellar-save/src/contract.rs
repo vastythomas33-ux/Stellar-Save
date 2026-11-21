@@ -5,19 +5,20 @@
 use crate::contribution::{ContributionPage, ContributionRecord};
 use crate::error::StellarSaveError;
 use crate::events::EventEmitter;
-use crate::events::*;
 use crate::group::{Group, GroupStatus};
 use crate::migration::{initialize_storage_version, migrate};
 use crate::payout::PayoutRecord;
-use crate::pool::{PoolCalculator, PoolInfo};
-use crate::rating::{GroupRating, RatingAggregate, RatingEntry};
+use crate::pool::PoolCalculator;
+use crate::rating::{GroupRating, RatingEntry};
 use crate::refund::RefundRecord;
 use crate::search::{SearchParams, SearchResult};
-use crate::storage::{StorageKey, StorageKeyBuilder};
+use crate::storage::StorageKeyBuilder;
 use crate::types::{AssignmentMode, ContractConfig, MemberProfile, PayoutScheduleEntry};
-use soroban_sdk::{contract, contractimpl, Address, Bytes, Env, String, Symbol, Vec, Map, BytesN};
+use crate::{
+    auth, governance, migration, milestones, payout_executor, penalty, rating, refund, search,
+};
 use core::cmp;
-use crate::{auth, governance, milestones, payout_executor, penalty, rating, refund, search, migration};
+use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, Map, String, Vec};
 
 #[contract]
 pub struct StellarSaveContract;
@@ -189,6 +190,26 @@ impl StellarSaveContract {
             member_address.clone(),
         );
 
+        // Validate every aggregate before writing so arithmetic errors cannot
+        // leave a partial record when this helper is used outside an entrypoint.
+        let total_key = StorageKeyBuilder::contribution_cycle_total(group_id, cycle_number);
+        let current_total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
+        let new_total = current_total
+            .checked_add(amount)
+            .ok_or(StellarSaveError::Overflow)?;
+
+        let count_key = StorageKeyBuilder::contribution_cycle_count(group_id, cycle_number);
+        let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        let new_count = current_count
+            .checked_add(1)
+            .ok_or(StellarSaveError::Overflow)?;
+
+        let balance_key = StorageKeyBuilder::group_balance(group_id);
+        let current_balance: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
+        let new_balance = current_balance
+            .checked_add(amount)
+            .ok_or(StellarSaveError::Overflow)?;
+
         // 2. Create and store contribution record (1 SSTORE)
         let contribution = ContributionRecord::new(
             member_address.clone(),
@@ -200,28 +221,13 @@ impl StellarSaveContract {
         env.storage().persistent().set(&contrib_key, &contribution);
 
         // 3. Update cycle total amount (1 SLOAD + 1 SSTORE)
-        let total_key = StorageKeyBuilder::contribution_cycle_total(group_id, cycle_number);
-        let current_total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
-        let new_total = current_total
-            .checked_add(amount)
-            .ok_or(StellarSaveError::Overflow)?;
         env.storage().persistent().set(&total_key, &new_total);
 
         // 4. Update cycle contributor count (1 SLOAD + 1 SSTORE)
-        let count_key = StorageKeyBuilder::contribution_cycle_count(group_id, cycle_number);
-        let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-        let new_count = current_count
-            .checked_add(1)
-            .ok_or(StellarSaveError::Overflow)?;
         env.storage().persistent().set(&count_key, &new_count);
 
         // 5. Gas opt: update incremental group balance counter (1 SLOAD + 1 SSTORE)
         //    Avoids O(n) loop in get_group_balance.
-        let balance_key = StorageKeyBuilder::group_balance(group_id);
-        let current_balance: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
-        let new_balance = current_balance
-            .checked_add(amount)
-            .ok_or(StellarSaveError::Overflow)?;
         env.storage().persistent().set(&balance_key, &new_balance);
 
         // 6. Update contribution streak and emit milestone events if thresholds crossed
@@ -452,7 +458,7 @@ impl StellarSaveContract {
 
         // 2. Round contribution amount to nearest 0.01 XLM (100,000 stroops)
         // This prevents precision issues with very small amounts
-        let rounded_amount = crate::helpers::round_contribution_amount(contribution_amount);
+        let rounded_amount = crate::helpers::try_round_contribution_amount(contribution_amount)?;
 
         // Ensure the rounded amount is still valid (greater than 0)
         if rounded_amount <= 0 {
@@ -555,10 +561,7 @@ impl StellarSaveContract {
         }
 
         // 11. Emit GroupCreated Event (include token_address as second data field)
-        env.events().publish(
-            (Symbol::new(&env, "GroupCreated"), creator),
-            (group_id, token_address.clone()),
-        );
+        EventEmitter::emit_legacy_group_created(&env, creator, group_id, token_address);
 
         // 12. Return Group ID
         Ok(group_id)
@@ -621,8 +624,7 @@ impl StellarSaveContract {
         env.storage().persistent().set(&group_key, &group);
 
         // 6. Task: Emit event
-        env.events()
-            .publish((Symbol::new(&env, "GroupUpdated"), group_id), group.creator);
+        EventEmitter::emit_legacy_group_updated(&env, group_id, group.creator);
 
         Ok(())
     }
@@ -1329,9 +1331,12 @@ impl StellarSaveContract {
         for (_, member) in members.iter() {
             let position = Self::get_payout_position(env.clone(), group_id, member.clone())?;
 
+            let cycle_offset = (position as u64)
+                .checked_mul(group.cycle_duration)
+                .ok_or(StellarSaveError::Overflow)?;
             let payout_date = group
                 .started_at
-                .checked_add(position as u64 * group.cycle_duration)
+                .checked_add(cycle_offset)
                 .ok_or(StellarSaveError::Overflow)?
                 .checked_add(group.cycle_duration)
                 .ok_or(StellarSaveError::Overflow)?;
@@ -1525,7 +1530,7 @@ impl StellarSaveContract {
             // identify_recipient() can do a single O(1) SLOAD.
             let pos_idx_key = StorageKeyBuilder::group_payout_position_index(group_id, position);
             env.storage().persistent().set(&pos_idx_key, &member);
-            loop_idx += 1;
+            loop_idx = loop_idx.checked_add(1).ok_or(StellarSaveError::Overflow)?;
         }
 
         Ok(())
@@ -2379,11 +2384,11 @@ impl StellarSaveContract {
         let mut pos: u32 = 0;
         for (_, m) in members1.iter() {
             combined_members.set(pos, m);
-            pos += 1;
+            pos = pos.checked_add(1).ok_or(StellarSaveError::Overflow)?;
         }
         for (_, m) in members2.iter() {
             combined_members.set(pos, m);
-            pos += 1;
+            pos = pos.checked_add(1).ok_or(StellarSaveError::Overflow)?;
         }
         let total_members = combined_members.len();
 
@@ -2732,8 +2737,7 @@ impl StellarSaveContract {
         env.storage().persistent().remove(&status_key);
 
         // 4. Task: Emit event
-        env.events()
-            .publish((Symbol::new(&env, "GroupDeleted"), group_id), group.creator);
+        EventEmitter::emit_legacy_group_deleted(&env, group_id, group.creator);
 
         Ok(())
     }
@@ -2802,11 +2806,11 @@ impl StellarSaveContract {
 
                     if &status == filter {
                         groups.push_back(group);
-                        count += 1;
+                        count = count.checked_add(1).ok_or(StellarSaveError::Overflow)?;
                     }
                 } else {
                     groups.push_back(group);
-                    count += 1;
+                    count = count.checked_add(1).ok_or(StellarSaveError::Overflow)?;
                 }
             }
         }
@@ -2934,7 +2938,7 @@ impl StellarSaveContract {
             let group_key = StorageKeyBuilder::group_data(id);
             if let Some(group) = env.storage().persistent().get::<_, Group>(&group_key) {
                 groups.push_back(group);
-                count += 1;
+                count = count.checked_add(1).ok_or(StellarSaveError::Overflow)?;
             }
         }
 
@@ -3174,9 +3178,12 @@ impl StellarSaveContract {
                 if collected < page_limit {
                     items.push_back(record);
                 }
-                collected += 1;
+                collected = collected.checked_add(1).ok_or(StellarSaveError::Overflow)?;
             }
-            cycle += 1;
+            if cycle == group.current_cycle || collected > page_limit {
+                break;
+            }
+            cycle = cycle.checked_add(1).ok_or(StellarSaveError::Overflow)?;
         }
 
         let has_more = collected > page_limit;
@@ -3313,9 +3320,17 @@ impl StellarSaveContract {
 
         // 2. Only report misses after the grace period has elapsed
         if group.started {
-            let cycle_deadline =
-                group.started_at + (group.cycle_duration * (cycle_number as u64 + 1));
-            let grace_end = cycle_deadline + group.grace_period_seconds;
+            let cycle_offset = (cycle_number as u64)
+                .checked_add(1)
+                .and_then(|next_cycle| next_cycle.checked_mul(group.cycle_duration))
+                .ok_or(StellarSaveError::Overflow)?;
+            let cycle_deadline = group
+                .started_at
+                .checked_add(cycle_offset)
+                .ok_or(StellarSaveError::Overflow)?;
+            let grace_end = cycle_deadline
+                .checked_add(group.grace_period_seconds)
+                .ok_or(StellarSaveError::Overflow)?;
             if env.ledger().timestamp() <= grace_end {
                 return Ok(Vec::new(&env));
             }
@@ -3637,15 +3652,14 @@ impl StellarSaveContract {
             .get::<_, Group>(&group_key)
             .ok_or(StellarSaveError::GroupNotFound)?;
 
+        let cycle_offset = (cycle as u64)
+            .checked_add(1)
+            .and_then(|next_cycle| group.cycle_duration.checked_mul(next_cycle))
+            .ok_or(StellarSaveError::Overflow)?;
         let deadline = group
             .started_at
-            .checked_add(
-                group
-                    .cycle_duration
-                    .checked_mul(cycle as u64 + 1)
-                    .ok_or(StellarSaveError::InternalError)?,
-            )
-            .ok_or(StellarSaveError::InternalError)?;
+            .checked_add(cycle_offset)
+            .ok_or(StellarSaveError::Overflow)?;
 
         let current_time = env.ledger().timestamp();
         let mut reminders_emitted = 0u32;
@@ -3941,7 +3955,8 @@ impl StellarSaveContract {
         let inactive_duration = current_time.saturating_sub(last_activity_time);
         let emergency_threshold = group
             .cycle_duration
-            .saturating_mul(crate::constants::EMERGENCY_WITHDRAW_INACTIVE_CYCLES);
+            .checked_mul(crate::constants::EMERGENCY_WITHDRAW_INACTIVE_CYCLES)
+            .ok_or(StellarSaveError::Overflow)?;
 
         if inactive_duration < emergency_threshold {
             return Err(StellarSaveError::InvalidState);
@@ -3981,9 +3996,11 @@ impl StellarSaveContract {
                 soroban_sdk::token::TokenClient::new(&env, &token_config.token_address);
             token_client.transfer(&env.current_contract_address(), &member, &withdrawal_amount);
 
-            env.events().publish(
-                (Symbol::new(&env, "emergency_withdrawal"),),
-                (group_id, member.clone(), withdrawal_amount),
+            EventEmitter::emit_emergency_withdrawal(
+                &env,
+                group_id,
+                member.clone(),
+                withdrawal_amount,
             );
         } else {
             // Member profile removed even if no funds to withdraw (already received payout)
@@ -4220,7 +4237,7 @@ impl StellarSaveContract {
             if idx >= offset && idx < offset.saturating_add(page_size) {
                 result.push_back(addr);
             }
-            idx += 1;
+            idx = idx.checked_add(1).ok_or(StellarSaveError::Overflow)?;
             if idx >= offset.saturating_add(page_size) {
                 break;
             }
@@ -4386,12 +4403,18 @@ impl StellarSaveContract {
         // Emit GracePeriodContribution for late-but-valid contributions.
         let now = env.ledger().timestamp();
         let is_grace_period = if group.started {
-            let cycle_deadline = group.started_at.saturating_add(
-                group
-                    .cycle_duration
-                    .saturating_mul(group.current_cycle as u64 + 1),
-            );
-            if now > cycle_deadline.saturating_add(group.grace_period_seconds) {
+            let cycle_offset = (group.current_cycle as u64)
+                .checked_add(1)
+                .and_then(|cycle| group.cycle_duration.checked_mul(cycle))
+                .ok_or(StellarSaveError::Overflow)?;
+            let cycle_deadline = group
+                .started_at
+                .checked_add(cycle_offset)
+                .ok_or(StellarSaveError::Overflow)?;
+            let grace_deadline = cycle_deadline
+                .checked_add(group.grace_period_seconds)
+                .ok_or(StellarSaveError::Overflow)?;
+            if now > grace_deadline {
                 return Err(StellarSaveError::CycleDeadlineExpired);
             }
             (now > cycle_deadline, now.saturating_sub(cycle_deadline))
@@ -4935,7 +4958,9 @@ impl StellarSaveContract {
                 timestamp,
             );
 
-            executed_count += 1;
+            executed_count = executed_count
+                .checked_add(1)
+                .ok_or(StellarSaveError::Overflow)?;
         }
 
         Ok(executed_count)
@@ -5207,7 +5232,7 @@ impl StellarSaveContract {
 
         // Completion rate: cycles done / max cycles * 100
         let completion_rate = if group.max_members > 0 {
-            (group.current_cycle * 100) / group.max_members
+            ((u64::from(group.current_cycle) * 100) / u64::from(group.max_members)).min(100) as u32
         } else {
             0
         };
@@ -5217,7 +5242,9 @@ impl StellarSaveContract {
         for cycle in 0..group.current_cycle {
             let total_key = StorageKeyBuilder::contribution_cycle_total(group_id, cycle);
             let cycle_total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
-            total_contributions = total_contributions.saturating_add(cycle_total);
+            total_contributions = total_contributions
+                .checked_add(cycle_total)
+                .ok_or(StellarSaveError::Overflow)?;
         }
 
         // Total distributed = cycles completed * pool amount per cycle
@@ -5229,7 +5256,9 @@ impl StellarSaveContract {
             .ok_or(StellarSaveError::Overflow)?;
 
         // TVL = contributions received but not yet paid out
-        let tvl = total_contributions.saturating_sub(total_distributed);
+        let tvl = total_contributions
+            .checked_sub(total_distributed)
+            .ok_or(StellarSaveError::Overflow)?;
 
         Ok((
             completion_rate,
@@ -5277,8 +5306,12 @@ impl StellarSaveContract {
                 .persistent()
                 .get::<_, ContributionRecord>(&contrib_key)
             {
-                cycles_contributed += 1;
-                total_contributed = total_contributed.saturating_add(record.amount);
+                cycles_contributed = cycles_contributed
+                    .checked_add(1)
+                    .ok_or(StellarSaveError::Overflow)?;
+                total_contributed = total_contributed
+                    .checked_add(record.amount)
+                    .ok_or(StellarSaveError::Overflow)?;
             }
         }
 
@@ -5334,7 +5367,7 @@ impl StellarSaveContract {
         member: Address,
         cycle_id: u32,
     ) -> Result<i128, StellarSaveError> {
-        penalty::apply_penalty(&env, group_id, member, cycle_id)
+        penalty::apply_penalty_by_creator(&env, group_id, member, cycle_id)
     }
 
     /// Allows a member to recover from a penalty by paying the missed
@@ -5428,8 +5461,5 @@ impl StellarSaveContract {
 } // close impl StellarSaveContract (proof/dynamic contributions block)
 
 fn emit_group_activated(env: &Env, group_id: u64, timestamp: u64, member_count: u32) {
-    env.events().publish(
-        (Symbol::new(env, "group_activated"), group_id),
-        (timestamp, member_count),
-    );
+    EventEmitter::emit_group_activated(env, group_id, timestamp, member_count);
 }

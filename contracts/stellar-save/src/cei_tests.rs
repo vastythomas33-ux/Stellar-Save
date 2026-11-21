@@ -31,7 +31,7 @@ use crate::contribution::ContributionRecord;
 use crate::group::{Group, GroupStatus, TokenConfig};
 use crate::refund::RefundRecord;
 use crate::storage::StorageKeyBuilder;
-use crate::{StellarSaveClient, StellarSaveContract};
+use crate::{StellarSaveContract, StellarSaveContractClient};
 
 const CONTRIBUTION: i128 = 10_000_000;
 const CYCLE_DURATION: u64 = 604_800;
@@ -54,6 +54,7 @@ const MODE_OFF: u32 = 0;
 const MODE_REFUND: u32 = 1;
 const MODE_CONTRIBUTE: u32 = 2;
 const MODE_EMERGENCY_WITHDRAW: u32 = 3;
+const MODE_CONTRIBUTE_BATCH: u32 = 4;
 
 /// A token that calls back into Stellar-Save while a transfer is in flight.
 ///
@@ -111,16 +112,20 @@ impl ReentrantToken {
         let target: Address = env.storage().instance().get(&TARGET).unwrap();
         let group_id: u64 = env.storage().instance().get(&GROUP).unwrap();
         let actor: Address = env.storage().instance().get(&ACTOR).unwrap();
-        let client = StellarSaveClient::new(env, &target);
+        let client = StellarSaveContractClient::new(env, &target);
 
         let rejected = match mode {
             MODE_REFUND => client.try_request_refund(&group_id, &0u32, &actor).is_err(),
             MODE_CONTRIBUTE => client
                 .try_contribute(&group_id, &actor, &CONTRIBUTION)
                 .is_err(),
-            MODE_EMERGENCY_WITHDRAW => client
-                .try_emergency_withdraw(&group_id, &actor)
-                .is_err(),
+            MODE_CONTRIBUTE_BATCH => {
+                let cycles = soroban_sdk::vec![env, 1u32];
+                client
+                    .try_contribute_batch(&group_id, &actor, &cycles)
+                    .is_err()
+            }
+            MODE_EMERGENCY_WITHDRAW => client.try_emergency_withdraw(&group_id, &actor).is_err(),
             _ => false,
         };
 
@@ -133,7 +138,7 @@ impl ReentrantToken {
 struct Fixture<'a> {
     env: Env,
     contract_id: Address,
-    client: StellarSaveClient<'a>,
+    client: StellarSaveContractClient<'a>,
     token_client: ReentrantTokenClient<'a>,
     member: Address,
 }
@@ -148,7 +153,7 @@ fn setup<'a>(group_id: u64) -> Fixture<'a> {
     let token_client = ReentrantTokenClient::new(&env, &token);
 
     let contract_id = env.register(StellarSaveContract, ());
-    let client = StellarSaveClient::new(&env, &contract_id);
+    let client = StellarSaveContractClient::new(&env, &contract_id);
 
     let creator = Address::generate(&env);
     let member = Address::generate(&env);
@@ -312,6 +317,42 @@ fn contribute_records_before_calling_the_token() {
 }
 
 #[test]
+fn contribute_batch_records_all_cycles_before_calling_the_token() {
+    let group_id = 6u64;
+    let fixture = setup(group_id);
+    let cycles = soroban_sdk::vec![&fixture.env, 1u32];
+
+    fixture.token_client.arm(
+        &fixture.contract_id,
+        &MODE_CONTRIBUTE_BATCH,
+        &group_id,
+        &fixture.member,
+    );
+
+    fixture
+        .client
+        .contribute_batch(&group_id, &fixture.member, &cycles);
+
+    assert!(
+        fixture.token_client.was_rejected(),
+        "reentrant batch contribution should hit the already-recorded cycle"
+    );
+    let recorded: Option<ContributionRecord> =
+        fixture.env.as_contract(&fixture.contract_id, || {
+            fixture
+                .env
+                .storage()
+                .persistent()
+                .get(&StorageKeyBuilder::contribution_individual(
+                    group_id,
+                    1,
+                    fixture.member.clone(),
+                ))
+        });
+    assert!(recorded.is_some());
+}
+
+#[test]
 fn a_disarmed_token_leaves_the_happy_path_intact() {
     let group_id = 4u64;
     let fixture = setup(group_id);
@@ -338,10 +379,11 @@ fn emergency_withdraw_removes_profile_before_calling_the_token() {
 
     // Seed group balance so emergency_withdraw can deduct
     fixture.env.as_contract(&fixture.contract_id, || {
-        fixture.env.storage().persistent().set(
-            &StorageKeyBuilder::group_balance(group_id),
-            &CONTRIBUTION,
-        );
+        fixture
+            .env
+            .storage()
+            .persistent()
+            .set(&StorageKeyBuilder::group_balance(group_id), &CONTRIBUTION);
     });
 
     fixture.token_client.arm(

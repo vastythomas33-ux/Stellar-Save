@@ -209,16 +209,26 @@ pub fn emit_contribution_made(
         },
     );
 
-    // Issue #754: emit structured receipt for indexer
+    emit_contribution_receipt(env, group_id, contributor, amount, cycle, contributed_at);
+}
+
+pub fn emit_contribution_receipt(
+    env: &Env,
+    group_id: u64,
+    member: Address,
+    amount: i128,
+    cycle: u32,
+    timestamp: u64,
+) {
     env.events().publish(
         ("contribution_receipt",),
         ContributionEvent {
             schema_version: CONTRIBUTION_SCHEMA_VERSION,
             group_id,
-            member: contributor,
+            member,
             amount,
             cycle,
-            timestamp: contributed_at,
+            timestamp,
         },
     );
 }
@@ -349,7 +359,13 @@ pub fn emit_auto_contribution_executed(
     );
 }
 
-pub fn emit_auto_contribution_failed(env: &Env, group_id: u64, member: Address, cycle: u32, failed_at: u64) {
+pub fn emit_auto_contribution_failed(
+    env: &Env,
+    group_id: u64,
+    member: Address,
+    cycle: u32,
+    failed_at: u64,
+) {
     env.events().publish(
         ("auto_contribution_failed",),
         AutoContributionFailed {
@@ -375,7 +391,13 @@ pub fn emit_fee_paid(env: &Env, creator: Address, treasury: Address, amount: i12
     );
 }
 
-pub fn emit_penalty_applied(env: &Env, group_id: u64, member: Address, amount: i128, cycle_id: u32) {
+pub fn emit_penalty_applied(
+    env: &Env,
+    group_id: u64,
+    member: Address,
+    amount: i128,
+    cycle_id: u32,
+) {
     env.events().publish(
         ("penalty_applied",),
         PenaltyApplied {
