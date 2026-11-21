@@ -151,7 +151,8 @@ bypassing the `has(&refund_key)` guard.
 
 ## Regression coverage
 
-`src/cei_tests.rs` registers a `ReentrantToken` - a minimal SEP-41 surface whose
+`src/cei_tests.rs` is included in the crate's unit-test build and registers a
+`ReentrantToken` - a minimal SEP-41 surface whose
 `transfer` / `transfer_from` calls back into Stellar-Save - and asserts that the
 reentrant call is rejected and exactly one record is written:
 
@@ -160,5 +161,6 @@ reentrant call is rejected and exactly one record is written:
 | `refund_writes_its_record_before_calling_the_token` | Finding 1 - reentrant refund hits `AlreadyRefunded` |
 | `a_second_refund_is_rejected_after_the_first_settles` | Finding 1 - the guard still works on the ordinary path |
 | `contribute_records_before_calling_the_token` | Finding 3 - the guard is still held during `transfer_from` |
+| `contribute_batch_records_all_cycles_before_calling_the_token` | Finding 4 - reentrant batches see the recorded cycle keys |
 | `a_disarmed_token_leaves_the_happy_path_intact` | The reordering did not change ordinary behaviour |
 | `emergency_withdraw_removes_profile_before_calling_the_token` | Finding 8 - reentrant emergency withdraw hits `NotMember` |

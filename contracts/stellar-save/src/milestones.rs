@@ -62,7 +62,7 @@ pub fn update_streak(env: &Env, group_id: u64, member: Address, cycle: u32) {
     let new_streak = if streak.last_contributed_cycle == u32::MAX {
         // First-ever contribution
         1
-    } else if cycle == streak.last_contributed_cycle + 1 {
+    } else if streak.last_contributed_cycle.checked_add(1) == Some(cycle) {
         // Consecutive cycle
         streak.current_streak.saturating_add(1)
     } else {
@@ -134,7 +134,7 @@ pub fn get_member_milestones(
         let contrib_key =
             StorageKeyBuilder::contribution_individual(group_id, cycle, member.clone());
         if env.storage().persistent().has(&contrib_key) {
-            let new_streak = if last_cycle == u32::MAX || cycle == last_cycle + 1 {
+            let new_streak = if last_cycle == u32::MAX || last_cycle.checked_add(1) == Some(cycle) {
                 streak.saturating_add(1)
             } else {
                 1

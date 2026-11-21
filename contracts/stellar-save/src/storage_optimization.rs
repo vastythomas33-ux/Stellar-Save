@@ -102,16 +102,19 @@ impl ContributionBitmap {
         let bit_set = (chunk & (1u64 << bit_position)) != 0;
 
         if !bit_set {
-            // Set the bit
-            let new_chunk = chunk | (1u64 << bit_position);
-            self.bitmap.set(chunk_index as u32, new_chunk);
-
-            // Update counters
-            self.contributors_count += 1;
-            self.total_amount = self
+            let contributors_count = self
+                .contributors_count
+                .checked_add(1)
+                .ok_or(StellarSaveError::Overflow)?;
+            let total_amount = self
                 .total_amount
                 .checked_add(amount)
-                .ok_or(StellarSaveError::InternalError)?;
+                .ok_or(StellarSaveError::Overflow)?;
+
+            self.bitmap
+                .set(chunk_index as u32, chunk | (1u64 << bit_position));
+            self.contributors_count = contributors_count;
+            self.total_amount = total_amount;
         }
 
         Ok(())
@@ -439,6 +442,20 @@ mod tests {
 
         let result = bitmap.set_contribution(10, 1_000_000);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_contribution_bitmap_overflow_does_not_set_bit() {
+        let mut bitmap = ContributionBitmap::new(1, 0, 10);
+        bitmap.total_amount = i128::MAX;
+
+        assert_eq!(
+            bitmap.set_contribution(0, 1),
+            Err(StellarSaveError::Overflow)
+        );
+        assert_eq!(bitmap.contributors_count, 0);
+        assert_eq!(bitmap.total_amount, i128::MAX);
+        assert_eq!(bitmap.has_contributed(0), Ok(false));
     }
 
     #[test]

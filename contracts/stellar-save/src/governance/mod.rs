@@ -16,9 +16,9 @@
 pub mod execution;
 pub mod proposal;
 pub mod storage;
-pub mod voting;
 #[cfg(test)]
 pub mod tests;
+pub mod voting;
 
 pub use proposal::propose_contribution_change;
 pub use voting::{vote_contribution_change, vote_dissolve};
@@ -40,5 +40,8 @@ pub use voting::{vote_contribution_change, vote_dissolve};
 /// ```
 pub fn majority_threshold(member_count: u32) -> u32 {
     use crate::constants::{GOVERNANCE_MAJORITY_DENOMINATOR, GOVERNANCE_MAJORITY_NUMERATOR};
-    member_count * GOVERNANCE_MAJORITY_NUMERATOR / GOVERNANCE_MAJORITY_DENOMINATOR + 1
+    (member_count / GOVERNANCE_MAJORITY_DENOMINATOR) * GOVERNANCE_MAJORITY_NUMERATOR
+        + (member_count % GOVERNANCE_MAJORITY_DENOMINATOR) * GOVERNANCE_MAJORITY_NUMERATOR
+            / GOVERNANCE_MAJORITY_DENOMINATOR
+        + 1
 }

@@ -1,7 +1,7 @@
 //! Helper utilities for formatting and display
 
 use crate::{Group, StellarSaveError, StorageKeyBuilder};
-use soroban_sdk::{Bytes, Env, String};
+use soroban_sdk::{Env, String};
 
 /// Validates a group metadata string (name or description).
 ///
@@ -65,10 +65,32 @@ pub fn round_contribution_amount(amount: i128) -> i128 {
         return amount;
     }
 
-    // Round to nearest ROUNDING_PRECISION
-    // For positive numbers: (amount + ROUNDING_PRECISION/2) / ROUNDING_PRECISION * ROUNDING_PRECISION
-    let half_precision = ROUNDING_PRECISION / 2;
-    ((amount + half_precision) / ROUNDING_PRECISION) * ROUNDING_PRECISION
+    let rounded_units = amount / ROUNDING_PRECISION
+        + if amount % ROUNDING_PRECISION >= ROUNDING_PRECISION / 2 {
+            1
+        } else {
+            0
+        };
+    rounded_units.min(i128::MAX / ROUNDING_PRECISION) * ROUNDING_PRECISION
+}
+
+/// Rounds a positive amount to the nearest contribution precision, returning
+/// `Overflow` if the rounded result cannot be represented by `i128`.
+pub fn try_round_contribution_amount(amount: i128) -> Result<i128, StellarSaveError> {
+    if amount <= 0 {
+        return Ok(amount);
+    }
+
+    let rounded_units = (amount / ROUNDING_PRECISION)
+        .checked_add(if amount % ROUNDING_PRECISION >= ROUNDING_PRECISION / 2 {
+            1
+        } else {
+            0
+        })
+        .ok_or(StellarSaveError::Overflow)?;
+    rounded_units
+        .checked_mul(ROUNDING_PRECISION)
+        .ok_or(StellarSaveError::Overflow)
 }
 
 /// Formats a group ID for display with a "GROUP-" prefix.
@@ -131,9 +153,15 @@ pub fn is_cycle_deadline_passed(group: &Group, current_time: u64) -> bool {
         return false;
     }
 
-    let cycle_deadline =
-        group.started_at + (group.cycle_duration * (group.current_cycle as u64 + 1));
-    current_time > cycle_deadline + group.grace_period_seconds
+    let Some(cycle_deadline) = (group.current_cycle as u64)
+        .checked_add(1)
+        .and_then(|cycle| cycle.checked_mul(group.cycle_duration))
+        .and_then(|offset| group.started_at.checked_add(offset))
+        .and_then(|deadline| deadline.checked_add(group.grace_period_seconds))
+    else {
+        return false;
+    };
+    current_time > cycle_deadline
 }
 
 /// Calculates the current cycle number for a savings group.
@@ -159,6 +187,9 @@ pub fn calculate_current_cycle(env: &Env, group_id: u64) -> Result<u32, StellarS
     if !group.started {
         return Ok(0);
     }
+    if group.cycle_duration == 0 || group.max_members == 0 {
+        return Err(StellarSaveError::InvalidState);
+    }
 
     // Step 3: Get current ledger time; guard against clock skew
     let current_time: u64 = env.ledger().timestamp();
@@ -169,15 +200,14 @@ pub fn calculate_current_cycle(env: &Env, group_id: u64) -> Result<u32, StellarS
     // Step 4: Compute elapsed cycles, cap at max_members - 1, cast to u32
     let elapsed: u64 = current_time - group.started_at;
     let cycles: u64 = elapsed / group.cycle_duration;
-    let cap: u64 = (group.max_members - 1) as u64;
-    let result: u32 = cycles.min(cap) as u32;
+    let cap = u64::from(group.max_members - 1);
+    let result = u32::try_from(cycles.min(cap)).map_err(|_| StellarSaveError::Overflow)?;
 
     Ok(result)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::group::GroupStatus;
     use soroban_sdk::{Address, Env};
 
     // ── validate_group_string tests ──────────────────────────────────────────
@@ -564,5 +594,49 @@ mod tests {
         assert_eq!(round_contribution_amount(100_000_000), 100_000_000);
         assert_eq!(round_contribution_amount(255_000_000), 255_000_000);
         assert_eq!(round_contribution_amount(1_002_500_000), 1_002_500_000);
+    }
+
+    #[test]
+    fn test_round_contribution_amount_max_value_is_bounded() {
+        let result = round_contribution_amount(i128::MAX);
+        assert_eq!(
+            result,
+            (i128::MAX / ROUNDING_PRECISION) * ROUNDING_PRECISION
+        );
+        assert_eq!(result % ROUNDING_PRECISION, 0);
+    }
+
+    #[test]
+    fn test_try_round_contribution_amount_handles_max_value() {
+        assert_eq!(
+            try_round_contribution_amount(i128::MAX),
+            Ok((i128::MAX / ROUNDING_PRECISION) * ROUNDING_PRECISION)
+        );
+    }
+
+    #[test]
+    fn test_is_cycle_deadline_passed_returns_false_on_timestamp_overflow() {
+        let env = Env::default();
+        let creator = Address::generate(&env);
+        let mut group = Group::new(&env, 1, creator, 100, 10, 5, 2, u64::MAX - 1, 0);
+        group.started = true;
+        group.started_at = u64::MAX - 1;
+
+        assert!(!is_cycle_deadline_passed(&group, u64::MAX));
+    }
+
+    #[test]
+    fn test_calculate_current_cycle_rejects_zero_duration() {
+        let env = Env::default();
+        let creator = Address::generate(&env);
+        let mut group = Group::new(&env, 1, creator, 1_000_000, 1, 5, 2, 1000, 0);
+        group.started = true;
+        group.cycle_duration = 0;
+        store_group(&env, &group);
+
+        assert_eq!(
+            calculate_current_cycle(&env, 1),
+            Err(StellarSaveError::InvalidState)
+        );
     }
 }

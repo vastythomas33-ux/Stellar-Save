@@ -1,5 +1,5 @@
 use core::fmt;
-use soroban_sdk::{contracttype, Address, Env, Map};
+use soroban_sdk::{contracttype, Address, Env};
 
 /// Protocol-level maximum number of members per group.
 /// Prevents unbounded storage growth and gas exhaustion.
@@ -451,10 +451,7 @@ impl Group {
     /// * `env` - Soroban environment
     /// * `group_id` - The ID of the completed group
     fn emit_completed_event(env: &soroban_sdk::Env, group_id: u64) {
-        env.events().publish(
-            (soroban_sdk::Symbol::new(env, "group_completed"),),
-            group_id,
-        );
+        crate::events::EventEmitter::emit_group_completed_signal(env, group_id);
     }
 
     /// Advances to the next cycle.

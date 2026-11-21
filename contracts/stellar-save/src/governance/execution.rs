@@ -93,7 +93,9 @@ pub fn execute_dissolution(
 
         EventEmitter::emit_refund_issued(env, group_id, member, refund_amount, current_cycle, now);
 
-        total_refunded = total_refunded.saturating_add(refund_amount);
+        total_refunded = total_refunded
+            .checked_add(refund_amount)
+            .ok_or(StellarSaveError::Overflow)?;
     }
 
     EventEmitter::emit_group_dissolved(env, group_id, now, total_refunded);
@@ -128,7 +130,10 @@ pub fn execute_contribution_change(
         group_id,
         old_amount,
         new_amount,
-        group.current_cycle + 1,
+        group
+            .current_cycle
+            .checked_add(1)
+            .ok_or(StellarSaveError::Overflow)?,
         timestamp,
     );
 

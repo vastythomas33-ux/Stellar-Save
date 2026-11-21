@@ -219,4 +219,16 @@ mod tests {
             Err(StellarSaveError::Unauthorized)
         );
     }
+
+    #[test]
+    fn test_auth_admin_guard_rejects_missing_config() {
+        let env = Env::default();
+        let caller = Address::generate(&env);
+        env.mock_all_auths();
+
+        assert_eq!(
+            require_admin(&env, &caller),
+            Err(StellarSaveError::Unauthorized)
+        );
+    }
 }

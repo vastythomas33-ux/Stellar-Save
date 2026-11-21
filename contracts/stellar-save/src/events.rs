@@ -8,6 +8,7 @@
 //! | [`contribution`] | Contributions, penalties, cycles, auto-pay       |
 //! | [`payout`]       | Payout execution                                 |
 //! | [`admin`]        | Contract-level pause/unpause, upgrades, disputes |
+//! | `compat`         | Legacy event topics/payloads retained for existing clients |
 //!
 //! All domain emitter functions are re-exported through [`EventEmitter`], the
 //! single public surface used by the rest of the contract.
@@ -23,14 +24,16 @@
 //! ## Breaking-change rules
 //! See `docs/adr/ADR-007-event-schema-versioning.md`.
 
-#[path = "events/group.rs"]
-pub mod group;
-#[path = "events/contribution.rs"]
-pub mod contribution;
-#[path = "events/payout.rs"]
-pub mod payout;
 #[path = "events/admin.rs"]
 pub mod admin;
+#[path = "events/compat.rs"]
+mod compat;
+#[path = "events/contribution.rs"]
+pub mod contribution;
+#[path = "events/group.rs"]
+pub mod group;
+#[path = "events/payout.rs"]
+pub mod payout;
 
 // Re-export all event types so callers can use `events::GroupCreated`, etc.
 pub use admin::{ContractPaused, ContractUnpaused, ContractUpgraded};
@@ -66,7 +69,62 @@ impl EventEmitter {
         max_members: u32,
         created_at: u64,
     ) {
-        group::emit_group_created(env, group_id, creator, contribution_amount, cycle_duration, max_members, created_at);
+        group::emit_group_created(
+            env,
+            group_id,
+            creator,
+            contribution_amount,
+            cycle_duration,
+            max_members,
+            created_at,
+        );
+    }
+
+    pub fn emit_legacy_group_created(
+        env: &soroban_sdk::Env,
+        creator: soroban_sdk::Address,
+        group_id: u64,
+        token_address: soroban_sdk::Address,
+    ) {
+        compat::emit_group_created(env, creator, group_id, token_address);
+    }
+
+    pub fn emit_legacy_group_updated(
+        env: &soroban_sdk::Env,
+        group_id: u64,
+        creator: soroban_sdk::Address,
+    ) {
+        compat::emit_group_updated(env, group_id, creator);
+    }
+
+    pub fn emit_legacy_group_deleted(
+        env: &soroban_sdk::Env,
+        group_id: u64,
+        creator: soroban_sdk::Address,
+    ) {
+        compat::emit_group_deleted(env, group_id, creator);
+    }
+
+    pub fn emit_group_activated(
+        env: &soroban_sdk::Env,
+        group_id: u64,
+        timestamp: u64,
+        member_count: u32,
+    ) {
+        compat::emit_group_activated(env, group_id, timestamp, member_count);
+    }
+
+    pub fn emit_group_completed_signal(env: &soroban_sdk::Env, group_id: u64) {
+        compat::emit_group_completed_signal(env, group_id);
+    }
+
+    pub fn emit_emergency_withdrawal(
+        env: &soroban_sdk::Env,
+        group_id: u64,
+        member: soroban_sdk::Address,
+        amount: i128,
+    ) {
+        compat::emit_emergency_withdrawal(env, group_id, member, amount);
     }
 
     pub fn emit_member_joined(
@@ -108,7 +166,14 @@ impl EventEmitter {
         total_distributed: i128,
         completed_at: u64,
     ) {
-        group::emit_group_completed(env, group_id, creator, total_cycles, total_distributed, completed_at);
+        group::emit_group_completed(
+            env,
+            group_id,
+            creator,
+            total_cycles,
+            total_distributed,
+            completed_at,
+        );
     }
 
     pub fn emit_group_status_changed(
@@ -119,7 +184,9 @@ impl EventEmitter {
         changed_by: soroban_sdk::Address,
         changed_at: u64,
     ) {
-        group::emit_group_status_changed(env, group_id, old_status, new_status, changed_by, changed_at);
+        group::emit_group_status_changed(
+            env, group_id, old_status, new_status, changed_by, changed_at,
+        );
     }
 
     pub fn emit_group_metadata_updated(
@@ -131,7 +198,15 @@ impl EventEmitter {
         image_url: soroban_sdk::String,
         updated_at: u64,
     ) {
-        group::emit_group_metadata_updated(env, group_id, updated_by, name, description, image_url, updated_at);
+        group::emit_group_metadata_updated(
+            env,
+            group_id,
+            updated_by,
+            name,
+            description,
+            image_url,
+            updated_at,
+        );
     }
 
     pub fn emit_group_paused(
@@ -180,7 +255,15 @@ impl EventEmitter {
         combined_balance: i128,
         merged_at: u64,
     ) {
-        group::emit_groups_merged(env, merged_group_id, source_group_id_1, source_group_id_2, member_count, combined_balance, merged_at);
+        group::emit_groups_merged(
+            env,
+            merged_group_id,
+            source_group_id_1,
+            source_group_id_2,
+            member_count,
+            combined_balance,
+            merged_at,
+        );
     }
 
     pub fn emit_member_invited(
@@ -264,7 +347,26 @@ impl EventEmitter {
         cycle_total: i128,
         contributed_at: u64,
     ) {
-        contribution::emit_contribution_made(env, group_id, contributor, amount, cycle, cycle_total, contributed_at);
+        contribution::emit_contribution_made(
+            env,
+            group_id,
+            contributor,
+            amount,
+            cycle,
+            cycle_total,
+            contributed_at,
+        );
+    }
+
+    pub fn emit_contribution_receipt(
+        env: &soroban_sdk::Env,
+        group_id: u64,
+        member: soroban_sdk::Address,
+        amount: i128,
+        cycle: u32,
+        timestamp: u64,
+    ) {
+        contribution::emit_contribution_receipt(env, group_id, member, amount, cycle, timestamp);
     }
 
     pub fn emit_contribution_missed(
@@ -275,7 +377,14 @@ impl EventEmitter {
         penalty_applied: i128,
         missed_at: u64,
     ) {
-        contribution::emit_contribution_missed(env, group_id, member, cycle, penalty_applied, missed_at);
+        contribution::emit_contribution_missed(
+            env,
+            group_id,
+            member,
+            cycle,
+            penalty_applied,
+            missed_at,
+        );
     }
 
     pub fn emit_grace_period_contribution(
@@ -287,7 +396,15 @@ impl EventEmitter {
         seconds_late: u64,
         contributed_at: u64,
     ) {
-        contribution::emit_grace_period_contribution(env, group_id, contributor, amount, cycle, seconds_late, contributed_at);
+        contribution::emit_grace_period_contribution(
+            env,
+            group_id,
+            contributor,
+            amount,
+            cycle,
+            seconds_late,
+            contributed_at,
+        );
     }
 
     pub fn emit_contribution_verified(
@@ -308,7 +425,14 @@ impl EventEmitter {
         new_amount: i128,
         proposed_at: u64,
     ) {
-        contribution::emit_contribution_amount_proposed(env, group_id, proposed_by, old_amount, new_amount, proposed_at);
+        contribution::emit_contribution_amount_proposed(
+            env,
+            group_id,
+            proposed_by,
+            old_amount,
+            new_amount,
+            proposed_at,
+        );
     }
 
     pub fn emit_contribution_amount_changed(
@@ -319,7 +443,14 @@ impl EventEmitter {
         effective_cycle: u32,
         changed_at: u64,
     ) {
-        contribution::emit_contribution_amount_changed(env, group_id, old_amount, new_amount, effective_cycle, changed_at);
+        contribution::emit_contribution_amount_changed(
+            env,
+            group_id,
+            old_amount,
+            new_amount,
+            effective_cycle,
+            changed_at,
+        );
     }
 
     pub fn emit_auto_contribution_executed(
@@ -330,7 +461,14 @@ impl EventEmitter {
         cycle: u32,
         executed_at: u64,
     ) {
-        contribution::emit_auto_contribution_executed(env, group_id, member, amount, cycle, executed_at);
+        contribution::emit_auto_contribution_executed(
+            env,
+            group_id,
+            member,
+            amount,
+            cycle,
+            executed_at,
+        );
     }
 
     pub fn emit_auto_contribution_failed(
@@ -392,7 +530,15 @@ impl EventEmitter {
         defaulted: bool,
         advanced_at: u64,
     ) {
-        contribution::emit_cycle_advanced(env, group_id, old_cycle, new_cycle, payout_executed, defaulted, advanced_at);
+        contribution::emit_cycle_advanced(
+            env,
+            group_id,
+            old_cycle,
+            new_cycle,
+            payout_executed,
+            defaulted,
+            advanced_at,
+        );
     }
 
     pub fn emit_cycle_deadline_extended(
@@ -404,7 +550,15 @@ impl EventEmitter {
         extended_by: soroban_sdk::Address,
         extended_at: u64,
     ) {
-        contribution::emit_cycle_deadline_extended(env, group_id, cycle, extension_seconds, new_deadline, extended_by, extended_at);
+        contribution::emit_cycle_deadline_extended(
+            env,
+            group_id,
+            cycle,
+            extension_seconds,
+            new_deadline,
+            extended_by,
+            extended_at,
+        );
     }
 
     pub fn emit_contribution_due(
@@ -433,11 +587,19 @@ impl EventEmitter {
 
     // ── Admin domain ─────────────────────────────────────────────────────────
 
-    pub fn emit_contract_paused(env: &soroban_sdk::Env, admin: soroban_sdk::Address, timestamp: u64) {
+    pub fn emit_contract_paused(
+        env: &soroban_sdk::Env,
+        admin: soroban_sdk::Address,
+        timestamp: u64,
+    ) {
         admin::emit_contract_paused(env, admin, timestamp);
     }
 
-    pub fn emit_contract_unpaused(env: &soroban_sdk::Env, admin: soroban_sdk::Address, timestamp: u64) {
+    pub fn emit_contract_unpaused(
+        env: &soroban_sdk::Env,
+        admin: soroban_sdk::Address,
+        timestamp: u64,
+    ) {
         admin::emit_contract_unpaused(env, admin, timestamp);
     }
 
@@ -461,7 +623,16 @@ impl EventEmitter {
         auto_paused: bool,
         raised_at: u64,
     ) {
-        admin::emit_dispute_raised(env, group_id, raised_by, reason, vote_count, threshold, auto_paused, raised_at);
+        admin::emit_dispute_raised(
+            env,
+            group_id,
+            raised_by,
+            reason,
+            vote_count,
+            threshold,
+            auto_paused,
+            raised_at,
+        );
     }
 
     pub fn emit_dispute_resolved(
@@ -584,10 +755,10 @@ mod tests {
     // ── Drift detection: domain source files ↔ schema.json ───────────────────
 
     const SCHEMA_JSON: &str = include_str!("../../../packages/events-schema/schema.json");
-    const GROUP_RS: &str    = include_str!("events/group.rs");
-    const CONTRIB_RS: &str  = include_str!("events/contribution.rs");
-    const PAYOUT_RS: &str   = include_str!("events/payout.rs");
-    const ADMIN_RS: &str    = include_str!("events/admin.rs");
+    const GROUP_RS: &str = include_str!("events/group.rs");
+    const CONTRIB_RS: &str = include_str!("events/contribution.rs");
+    const PAYOUT_RS: &str = include_str!("events/payout.rs");
+    const ADMIN_RS: &str = include_str!("events/admin.rs");
 
     fn all_domain_sources() -> [&'static str; 4] {
         [GROUP_RS, CONTRIB_RS, PAYOUT_RS, ADMIN_RS]
@@ -689,7 +860,10 @@ mod tests {
             );
             count += 1;
         }
-        assert!(count > 0, "schema_version field check found no 'fields' blocks in schema.json");
+        assert!(
+            count > 0,
+            "schema_version field check found no 'fields' blocks in schema.json"
+        );
     }
 
     // ── Emitter smoke tests ───────────────────────────────────────────────────
@@ -719,7 +893,15 @@ mod tests {
     fn test_event_emitter_contribution_made() {
         let env = Env::default();
         let contributor = Address::generate(&env);
-        EventEmitter::emit_contribution_made(&env, 1, contributor, 10_000_000, 1, 50_000_000, 1234567890);
+        EventEmitter::emit_contribution_made(
+            &env,
+            1,
+            contributor,
+            10_000_000,
+            1,
+            50_000_000,
+            1234567890,
+        );
     }
 
     #[test]

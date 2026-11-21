@@ -20,7 +20,7 @@ pub fn get_current_cycle(group: &Group, now: u64) -> u32 {
     let elapsed = now - group.started_at;
     let cycle = elapsed / group.cycle_duration;
     // Cap at max_members so we never exceed the group's total cycles
-    (cycle as u32).min(group.max_members)
+    cycle.min(u64::from(group.max_members)) as u32
 }
 
 /// Returns the start timestamp of a given cycle.
@@ -64,7 +64,10 @@ pub fn is_cycle_expired(
     grace_period: u64,
 ) -> Result<bool, StellarSaveError> {
     let deadline = get_cycle_deadline(group, cycle_number)?;
-    Ok(now > deadline.saturating_add(grace_period))
+    let expiry = deadline
+        .checked_add(grace_period)
+        .ok_or(StellarSaveError::Overflow)?;
+    Ok(now > expiry)
 }
 
 // ─── Cycle Transition ─────────────────────────────────────────────────────────
@@ -236,6 +239,13 @@ mod tests {
         assert_eq!(get_current_cycle(&g, ONE_WEEK_SECONDS * 100), 3);
     }
 
+    #[test]
+    fn test_get_current_cycle_does_not_wrap_before_capping() {
+        let env = Env::default();
+        let g = make_group(&env, 20, 1, 0);
+        assert_eq!(get_current_cycle(&g, u64::from(u32::MAX) + 1), 20);
+    }
+
     // ── is_cycle_expired ──────────────────────────────────────────────────
 
     #[test]
@@ -243,7 +253,10 @@ mod tests {
         let env = Env::default();
         let g = make_group(&env, 4, ONE_WEEK_SECONDS, 0);
         // Deadline for cycle 0 = ONE_WEEK_SECONDS; now = ONE_WEEK_SECONDS - 1
-        assert_eq!(is_cycle_expired(&g, 0, ONE_WEEK_SECONDS - 1, 0).unwrap(), false);
+        assert_eq!(
+            is_cycle_expired(&g, 0, ONE_WEEK_SECONDS - 1, 0).unwrap(),
+            false
+        );
     }
 
     #[test]
@@ -257,7 +270,10 @@ mod tests {
     fn test_is_cycle_expired_true_after_deadline() {
         let env = Env::default();
         let g = make_group(&env, 4, ONE_WEEK_SECONDS, 0);
-        assert_eq!(is_cycle_expired(&g, 0, ONE_WEEK_SECONDS + 1, 0).unwrap(), true);
+        assert_eq!(
+            is_cycle_expired(&g, 0, ONE_WEEK_SECONDS + 1, 0).unwrap(),
+            true
+        );
     }
 
     #[test]
@@ -285,6 +301,18 @@ mod tests {
             )
             .unwrap(),
             true
+        );
+    }
+
+    #[test]
+    fn test_is_cycle_expired_reports_deadline_overflow() {
+        let env = Env::default();
+        let mut group = make_group(&env, 4, 10, u64::MAX - 1);
+        group.started_at = u64::MAX - 1;
+
+        assert_eq!(
+            is_cycle_expired(&group, 0, u64::MAX, 0),
+            Err(StellarSaveError::Overflow)
         );
     }
 

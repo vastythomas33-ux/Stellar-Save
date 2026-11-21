@@ -60,30 +60,6 @@ use soroban_sdk::{Address, Env};
 /// * `Err(StellarSaveError::GroupNotFound)` - Group does not exist
 /// * `Err(StellarSaveError::InvalidState)`  - Group is not Active or no
 ///   recipient found for the current cycle
-pub fn get_next_recipient(env: &Env, group_id: u64) -> Result<Address, StellarSaveError> {
-    use crate::group::GroupStatus;
-
-    let group_key = StorageKeyBuilder::group_data(group_id);
-    let group: crate::group::Group = env
-        .storage()
-        .persistent()
-        .get(&group_key)
-        .ok_or(StellarSaveError::GroupNotFound)?;
-
-    if group.status != GroupStatus::Active {
-        return Err(StellarSaveError::InvalidState);
-    }
-
-    // O(1) lookup: position → Address via the reverse index written at
-    // join_group / assign_payout_positions time.
-    let pos_idx_key =
-        StorageKeyBuilder::group_payout_position_index(group_id, group.current_cycle);
-    env.storage()
-        .persistent()
-        .get::<_, Address>(&pos_idx_key)
-        .ok_or(StellarSaveError::InvalidState)
-}
-
 /// Returns the address of the next scheduled payout recipient without executing the payout.
 ///
 /// The recipient is derived from the group's `current_cycle` and the payout position
@@ -231,7 +207,9 @@ fn identify_recipient_sequential(
         if let Some(position) = env.storage().persistent().get::<_, u32>(&pos_key) {
             if position == current_cycle {
                 recipient = Some(member_address);
-                match_count += 1;
+                match_count = match_count
+                    .checked_add(1)
+                    .ok_or(StellarSaveError::Overflow)?;
             }
         }
     }
@@ -682,16 +660,7 @@ fn emit_payout_event(
     EventEmitter::emit_payout_executed(env, group_id, recipient.clone(), amount, cycle, timestamp);
 
     // Issue #754: emit structured contribution receipt for indexer
-    env.events().publish(
-        ("contribution_receipt",),
-        crate::events::ContributionEvent {
-            group_id,
-            member: recipient,
-            amount,
-            cycle,
-            timestamp,
-        },
-    );
+    EventEmitter::emit_contribution_receipt(env, group_id, recipient, amount, cycle, timestamp);
 
     // Event emission completed (or failed gracefully)
     // The payout flow continues regardless of event emission status
@@ -742,7 +711,10 @@ fn advance_cycle_or_complete(env: &Env, group: &mut Group) -> Result<(), Stellar
     // Emit CycleAdvanced event (only when group is not yet complete)
     if !group.is_complete() {
         let timestamp = env.ledger().timestamp();
-        let old_cycle = group.current_cycle.saturating_sub(1);
+        let old_cycle = group
+            .current_cycle
+            .checked_sub(1)
+            .ok_or(StellarSaveError::InvalidState)?;
         EventEmitter::emit_cycle_advanced(
             env,
             group.id,
